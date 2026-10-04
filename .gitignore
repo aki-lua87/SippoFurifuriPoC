@@ -1,0 +1,5 @@
+bin/
+obj/
+.vs/
+*.user
+依頼書.txt

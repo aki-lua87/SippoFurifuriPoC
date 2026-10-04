@@ -1,0 +1,32 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build
+        run: dotnet build TailEmg.sln -c Release
+
+      - name: Test
+        run: dotnet test TailEmg.sln -c Release --no-build
+
+      # Framework-dependent: needs the .NET 8 Desktop Runtime on the PC that runs it.
+      - name: Publish
+        run: dotnet publish src/TailEmg.App -c Release -r win-x64 --no-self-contained -o publish
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TailEmg-win-x64-${{ github.sha }}
+          path: publish/
+          if-no-files-found: error
