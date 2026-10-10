@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Windows 10 SDK TFM gives access to Windows.Devices.Bluetooth (WinRT) without extra NuGet packages. -->
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TailEmg.Core\TailEmg.Core.csproj" />
+  </ItemGroup>
+
+</Project>

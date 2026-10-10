@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\TailEmg.Core\TailEmg.Core.csproj" />
+    <ProjectReference Include="..\TailEmg.Windows\TailEmg.Windows.csproj" />
   </ItemGroup>
 
   <PropertyGroup>
