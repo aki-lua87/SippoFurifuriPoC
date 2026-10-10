@@ -33,6 +33,10 @@ public sealed class MainViewModel : ObservableObject
     private readonly ConcurrentQueue<BleNotification> _notifications = new();
     private readonly List<string> _logLines = new();
     private int _tick;
+    private long _notificationCount;
+    private long _rateBaseCount;
+    private readonly System.Diagnostics.Stopwatch _rateClock = System.Diagnostics.Stopwatch.StartNew();
+    private string _notificationRateText = "-";
 
     private InputSourceKind _inputSource = InputSourceKind.Fake;
     private bool _isRunning;
@@ -153,6 +157,7 @@ public sealed class MainViewModel : ObservableObject
     public string BleStateText { get => _bleStateText; private set => Set(ref _bleStateText, value); }
     public string BleDeviceName { get => _bleDeviceName; private set => Set(ref _bleDeviceName, value); }
     public string BleError { get => _bleError; private set => Set(ref _bleError, value); }
+    public string NotificationRateText { get => _notificationRateText; private set => Set(ref _notificationRateText, value); }
     public string GattReportText { get => _gattReportText; private set => Set(ref _gattReportText, value); }
     public string NotificationLog { get => _notificationLog; private set => Set(ref _notificationLog, value); }
     public bool PauseLog { get => _pauseLog; set => Set(ref _pauseLog, value); }
@@ -244,6 +249,7 @@ public sealed class MainViewModel : ObservableObject
 
             _ble.TargetAddress = SelectedDevice.Address;
             BleDeviceName = SelectedDevice.Name ?? SelectedDevice.Display.Trim();
+            await StopScanForConnectAsync();
         }
 
         IsRunning = true;
@@ -295,6 +301,22 @@ public sealed class MainViewModel : ObservableObject
         SyncScanState();
     }
 
+    /// <summary>
+    /// An active scan running during a connection attempt makes some Windows BLE adapters
+    /// fail with "Unreachable", so stop it first. The device list is kept.
+    /// </summary>
+    private async Task StopScanForConnectAsync()
+    {
+        if (!_scanner.IsScanning)
+        {
+            return;
+        }
+
+        _scanner.Stop();
+        SyncScanState();
+        await Task.Delay(300);
+    }
+
     private async Task DiscoverAsync()
     {
         var device = SelectedDevice;
@@ -305,6 +327,7 @@ public sealed class MainViewModel : ObservableObject
 
         _discovering = true;
         DiscoverCommand.RaiseCanExecuteChanged();
+        await StopScanForConnectAsync();
         GattReportText = $"Connecting to {device.Display.Trim()} ...";
         try
         {
@@ -330,6 +353,7 @@ public sealed class MainViewModel : ObservableObject
     // Runs on a thread-pool thread: touch only thread-safe things here.
     private void OnBleNotification(object? sender, BleNotification n)
     {
+        Interlocked.Increment(ref _notificationCount);
         _notifications.Enqueue(n);
         while (_notifications.Count > MaxQueuedNotifications && _notifications.TryDequeue(out _))
         {
@@ -375,11 +399,28 @@ public sealed class MainViewModel : ObservableObject
             DrainNotifications();
         }
 
+        UpdateNotificationRate();
+
         if (_tick % 6 == 0)
         {
             SyncDevices();
             SyncScanState();
         }
+    }
+
+    /// <summary>Notifications per second, averaged over ~1 s windows (BLE arrives in bursts).</summary>
+    private void UpdateNotificationRate()
+    {
+        var elapsed = _rateClock.Elapsed.TotalSeconds;
+        if (elapsed < 1.0)
+        {
+            return;
+        }
+
+        var count = Interlocked.Read(ref _notificationCount);
+        NotificationRateText = $"{(count - _rateBaseCount) / elapsed:0} Hz";
+        _rateBaseCount = count;
+        _rateClock.Restart();
     }
 
     private void SyncScanState()

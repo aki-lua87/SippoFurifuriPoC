@@ -67,7 +67,7 @@
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
                         <Grid.RowDefinitions>
-                            <RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/>
+                            <RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/>
                         </Grid.RowDefinitions>
                         <TextBlock Text="Status"/>
                         <TextBlock Grid.Column="1" Text="{Binding BleStateText}" FontWeight="Bold"/>
@@ -77,7 +77,9 @@
                         <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding Raw, StringFormat={}{0:0.00}}" FontFamily="Consolas"/>
                         <TextBlock Grid.Row="3" Text="Last Sample"/>
                         <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding LastSampleText}" FontFamily="Consolas"/>
-                        <TextBlock Grid.Row="4" Grid.ColumnSpan="2" Foreground="Red" TextWrapping="Wrap" Text="{Binding BleError}"/>
+                        <TextBlock Grid.Row="4" Text="Notify rate"/>
+                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding NotificationRateText}" FontFamily="Consolas"/>
+                        <TextBlock Grid.Row="5" Grid.ColumnSpan="2" Foreground="Red" TextWrapping="Wrap" Text="{Binding BleError}"/>
                     </Grid>
                 </StackPanel>
             </GroupBox>
@@ -130,7 +132,7 @@
                     <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding Curves}" SelectedItem="{Binding Curve}" Margin="0,2"/>
                     <TextBlock Grid.Row="2" Text="Gamma"/>
                     <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding Gamma, UpdateSourceTrigger=PropertyChanged}"/>
-                    <TextBlock Grid.Row="3" Text="Smoothing (α)"/>
+                    <TextBlock Grid.Row="3" Text="Smoothing (α/33ms)" ToolTip="Per-frame (33 ms) coefficient; rescaled by real elapsed time, so independent of input rate"/>
                     <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding Smoothing, UpdateSourceTrigger=PropertyChanged}"/>
                 </Grid>
             </GroupBox>

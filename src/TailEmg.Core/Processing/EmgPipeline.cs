@@ -43,6 +43,7 @@ public sealed class EmgPipeline
 {
     private readonly ConcurrentDictionary<int, double> _filtered = new();
     private readonly ConcurrentDictionary<int, ProcessedSample> _latest = new();
+    private readonly ConcurrentDictionary<int, DateTimeOffset> _lastTime = new();
 
     public EmgPipeline(ProcessingSettings settings) => Settings = settings;
 
@@ -61,7 +62,11 @@ public sealed class EmgPipeline
 
         // Channels are only ever processed from one producer thread each, so read-modify-write is safe.
         var previous = _filtered.GetValueOrDefault(sample.Channel, 0);
-        var filtered = SignalProcessing.Ema(previous, curved, s.SmoothingAlpha);
+        var dt = _lastTime.TryGetValue(sample.Channel, out var last)
+            ? (sample.Timestamp - last).TotalSeconds
+            : SignalProcessing.EmaReferenceSeconds; // first sample after Reset: one reference step
+        _lastTime[sample.Channel] = sample.Timestamp;
+        var filtered = SignalProcessing.EmaTimed(previous, curved, s.SmoothingAlpha, dt);
         _filtered[sample.Channel] = filtered;
 
         var result = new ProcessedSample(sample.Timestamp, sample.Channel, sample.Value, normalized, dead, curved, filtered);
@@ -79,5 +84,6 @@ public sealed class EmgPipeline
     {
         _filtered.Clear();
         _latest.Clear();
+        _lastTime.Clear();
     }
 }

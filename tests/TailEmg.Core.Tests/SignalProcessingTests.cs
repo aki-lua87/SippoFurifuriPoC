@@ -58,13 +58,59 @@ public class SignalProcessingTests
     }
 
     [Fact]
+    public void EmaTimed_OneReferenceStep_EqualsPlainEma()
+        => Assert.Equal(
+            SignalProcessing.Ema(0, 1, 0.25),
+            SignalProcessing.EmaTimed(0, 1, 0.25, SignalProcessing.EmaReferenceSeconds),
+            9);
+
+    [Fact]
+    public void EmaTimed_ZeroDt_LeavesValueUnchanged()
+        => Assert.Equal(0.3, SignalProcessing.EmaTimed(0.3, 1.0, 0.25, 0), 9);
+
+    [Fact]
+    public void EmaTimed_SameWallTime_SameResultRegardlessOfSampleRate()
+    {
+        // 1 reference step delivered as 1 sample vs. 20 samples must land in the same place.
+        var one = SignalProcessing.EmaTimed(0, 1, 0.25, SignalProcessing.EmaReferenceSeconds);
+        var many = 0.0;
+        for (var i = 0; i < 20; i++)
+        {
+            many = SignalProcessing.EmaTimed(many, 1, 0.25, SignalProcessing.EmaReferenceSeconds / 20);
+        }
+
+        Assert.Equal(one, many, 9);
+    }
+
+    [Fact]
+    public void Pipeline_Smoothing_IsIndependentOfInputRate()
+    {
+        double Run(int sampleIntervalMs)
+        {
+            var pipeline = new EmgPipeline(new ProcessingSettings());
+            var t0 = DateTimeOffset.UtcNow;
+            ProcessedSample? last = null;
+            for (var ms = 0; ms <= 100; ms += sampleIntervalMs)
+            {
+                last = pipeline.Process(new(t0.AddMilliseconds(ms), 0, 4095));
+            }
+
+            return last!.Filtered;
+        }
+
+        // The first sample after Reset counts as one reference step, so allow that small offset.
+        Assert.Equal(Run(2), Run(20), 1);
+    }
+
+    [Fact]
     public void Pipeline_FullScaleInput_ConvergesToOne()
     {
         var pipeline = new EmgPipeline(new ProcessingSettings());
+        var t0 = DateTimeOffset.UtcNow;
         ProcessedSample? last = null;
         for (var i = 0; i < 100; i++)
         {
-            last = pipeline.Process(new(DateTimeOffset.UtcNow, 0, 4095));
+            last = pipeline.Process(new(t0.AddMilliseconds(33 * i), 0, 4095));
         }
 
         Assert.NotNull(last);

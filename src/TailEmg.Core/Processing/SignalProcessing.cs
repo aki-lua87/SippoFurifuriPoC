@@ -41,10 +41,27 @@ public static class SignalProcessing
             : input;
     }
 
+    /// <summary>Length of the step that <c>alpha</c> is defined for in <see cref="EmaTimed"/> (the OSC frame at 30 Hz).</summary>
+    public const double EmaReferenceSeconds = 1.0 / 30.0;
+
     /// <summary>filtered = previous + alpha * (current - previous)</summary>
     public static double Ema(double previous, double current, double alpha)
     {
         alpha = Math.Clamp(alpha, 0, 1);
         return previous + alpha * (current - previous);
+    }
+
+    /// <summary>
+    /// EMA whose smoothing does not depend on the input rate: <paramref name="alpha"/> is the per-
+    /// <see cref="EmaReferenceSeconds"/> coefficient, rescaled for the real elapsed time
+    /// (alpha_eff = 1 - (1 - alpha)^(dt / reference)). 50 Hz fake data and ~700 Hz BLE bursts
+    /// therefore feel the same. dt of 0 leaves the value unchanged.
+    /// </summary>
+    public static double EmaTimed(double previous, double current, double alpha, double dtSeconds)
+    {
+        alpha = Math.Clamp(alpha, 0, 1);
+        dtSeconds = Math.Max(0, dtSeconds);
+        var effective = alpha >= 1 ? 1 : 1 - Math.Pow(1 - alpha, dtSeconds / EmaReferenceSeconds);
+        return previous + effective * (current - previous);
     }
 }
