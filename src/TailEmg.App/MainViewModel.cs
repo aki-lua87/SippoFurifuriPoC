@@ -1,11 +1,17 @@
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
+using System.IO;
+using System.Windows.Media;
 using System.Windows.Threading;
+using TailEmg.App.Charts;
 using TailEmg.App.Mvvm;
 using TailEmg.Core.Ble;
 using TailEmg.Core.Input;
+using TailEmg.Core.Logging;
 using TailEmg.Core.Osc;
 using TailEmg.Core.Processing;
+using TailEmg.Core.Settings;
 using TailEmg.Windows;
 
 namespace TailEmg.App;
@@ -20,7 +26,17 @@ public sealed class MainViewModel : ObservableObject
 {
     private const int MaxLogLines = 200;
     private const int MaxQueuedNotifications = 500;
+    private const double ChartWindowSeconds = 10;
     private static readonly TimeSpan SafeRampWait = TimeSpan.FromMilliseconds(300);
+    private static readonly TimeSpan CalibrationDuration = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan FreshSampleAge = TimeSpan.FromMilliseconds(500);
+
+    private static readonly string AppDataDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TailEmg");
+    private static readonly string SettingsPath = Path.Combine(AppDataDir, "settings.json");
+    // Local (not Documents/OneDrive): a 700 Hz log grows fast and should not be synced.
+    public static readonly string LogDirectory = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TailEmg", "Logs");
 
     private readonly FakeEmgInput _fake = new();
     private readonly MyoWareBleInput _ble = new();
@@ -58,6 +74,18 @@ public sealed class MainViewModel : ObservableObject
     private bool _pauseLog;
     private bool _discovering;
 
+    private readonly CsvLogger _logger = new();
+    private AppSettings _lastSavedSettings;
+    private ulong? _savedBleAddress;
+    private string? _savedBleName;
+
+    private CalibrationCollector? _collector;
+    private readonly Stopwatch _calibrationClock = new();
+    private string _calibrationStatus = "";
+
+    private bool _isLogging;
+    private string _loggingStatus = "Not logging";
+
     public MainViewModel()
     {
         _pipeline = new EmgPipeline(_processing);
@@ -66,6 +94,9 @@ public sealed class MainViewModel : ObservableObject
         _ble.SampleReceived += _pipeline.OnSample;
         _ble.NotificationReceived += OnBleNotification;
         _ble.StateChanged += OnBleStateChanged;
+        _pipeline.SampleProcessed += OnSampleProcessed;
+
+        _lastSavedSettings = LoadSettings();
 
         _publisher = new OscPublisher(_osc, () => _pipeline.GetFiltered(FakeEmgInput.DefaultChannel));
 
@@ -75,6 +106,13 @@ public sealed class MainViewModel : ObservableObject
         ConnectCommand = new RelayCommand(StartAsync, () => !IsRunning && IsBleSource && SelectedDevice is not null);
         DisconnectCommand = new RelayCommand(StopAsync, () => IsRunning && IsBleSource);
         DiscoverCommand = new RelayCommand(DiscoverAsync, () => SelectedDevice is not null && !_discovering);
+        CalibrateRestCommand = new RelayCommand(() => BeginCalibration(CalibrationKind.Rest), () => CanCalibrate);
+        CalibrateMaxCommand = new RelayCommand(() => BeginCalibration(CalibrationKind.Max), () => CanCalibrate);
+        ToggleLoggingCommand = new RelayCommand(ToggleLoggingAsync);
+        OpenLogFolderCommand = new RelayCommand(OpenLogFolder);
+
+        RawChartSeries = new[] { _rawSeries, _restSeries, _maxSeries };
+        OutputChartSeries = new[] { _normalizedSeries, _filteredSeries, _oscSeries };
 
         _uiTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(33) };
         _uiTimer.Tick += (_, _) => OnUiTick();
@@ -87,6 +125,24 @@ public sealed class MainViewModel : ObservableObject
     public RelayCommand ConnectCommand { get; }
     public RelayCommand DisconnectCommand { get; }
     public RelayCommand DiscoverCommand { get; }
+    public RelayCommand CalibrateRestCommand { get; }
+    public RelayCommand CalibrateMaxCommand { get; }
+    public RelayCommand ToggleLoggingCommand { get; }
+    public RelayCommand OpenLogFolderCommand { get; }
+
+    // --- Chart data (UI thread only) ---
+    private readonly ChartSeries _rawSeries = new("Raw", Color.FromRgb(0x1F, 0x77, 0xB4));
+    private readonly ChartSeries _restSeries = new("REST", Color.FromRgb(0x2C, 0xA0, 0x2C), dashed: true);
+    private readonly ChartSeries _maxSeries = new("MAX", Color.FromRgb(0xD6, 0x27, 0x28), dashed: true);
+    private readonly ChartSeries _normalizedSeries = new("Normalized", Color.FromRgb(0xFF, 0x9F, 0x1C));
+    private readonly ChartSeries _filteredSeries = new("Filtered", Color.FromRgb(0x1F, 0x77, 0xB4));
+    private readonly ChartSeries _oscSeries = new("OSC", Color.FromRgb(0x2C, 0xA0, 0x2C));
+
+    public IReadOnlyList<ChartSeries> RawChartSeries { get; }
+    public IReadOnlyList<ChartSeries> OutputChartSeries { get; }
+
+    /// <summary>Raised on the UI thread each time new chart points were added.</summary>
+    public event EventHandler? ChartUpdated;
 
     public IReadOnlyList<InputSourceKind> InputSources { get; } = Enum.GetValues<InputSourceKind>();
     public IReadOnlyList<FakeEmgMode> InputModes { get; } = Enum.GetValues<FakeEmgMode>();
@@ -148,6 +204,13 @@ public sealed class MainViewModel : ObservableObject
         {
             if (Set(ref _selectedDevice, value))
             {
+                if (value is not null)
+                {
+                    // Remember the user's choice (null happens when the list is cleared; keep the last real one).
+                    _savedBleAddress = value.Address;
+                    _savedBleName = value.Name;
+                }
+
                 RaiseCommands();
             }
         }
@@ -231,6 +294,15 @@ public sealed class MainViewModel : ObservableObject
     public string OscError { get => _oscError; private set => Set(ref _oscError, value); }
     public string LastSampleText { get => _lastSampleText; private set => Set(ref _lastSampleText, value); }
 
+    // --- Calibration capture ---
+    public string CalibrationStatus { get => _calibrationStatus; private set => Set(ref _calibrationStatus, value); }
+    private bool CanCalibrate => IsRunning && _collector is null;
+
+    // --- Logging ---
+    public bool IsLogging { get => _isLogging; private set { if (Set(ref _isLogging, value)) OnPropertyChanged(nameof(LoggingButtonText)); } }
+    public string LoggingButtonText => _isLogging ? "Stop Logging" : "Start Logging";
+    public string LoggingStatus { get => _loggingStatus; private set => Set(ref _loggingStatus, value); }
+
     private IEmgInput ActiveInput => IsBleSource ? _ble : _fake;
 
     private async Task StartAsync()
@@ -279,6 +351,184 @@ public sealed class MainViewModel : ObservableObject
 
         IsRunning = false;
         Status = "Stopped";
+    }
+
+    // ---------- Settings ----------
+
+    private AppSettings LoadSettings()
+    {
+        var s = SettingsStore.Load(SettingsPath);
+        _osc.Host = s.OscHost;
+        _osc.Port = s.OscPort;
+        _osc.Address = s.OscAddress;
+        _osc.RateHz = s.OscRateHz;
+        _processing.Deadzone = s.Deadzone;
+        _processing.Gamma = s.Gamma;
+        _processing.SmoothingAlpha = s.Smoothing;
+        _processing.Curve = s.Curve;
+        _processing.Rest = s.Rest;
+        _processing.Max = s.Max;
+        _inputSource = Enum.TryParse<InputSourceKind>(s.InputSource, out var kind) ? kind : InputSourceKind.Fake;
+        _savedBleAddress = s.LastBleAddress;
+        _savedBleName = s.LastBleName;
+        return s;
+    }
+
+    private AppSettings CaptureSettings() => new()
+    {
+        OscHost = _osc.Host,
+        OscPort = _osc.Port,
+        OscAddress = _osc.Address,
+        OscRateHz = _osc.RateHz,
+        Deadzone = _processing.Deadzone,
+        Gamma = _processing.Gamma,
+        Smoothing = _processing.SmoothingAlpha,
+        Curve = _processing.Curve,
+        Rest = _processing.Rest,
+        Max = _processing.Max,
+        InputSource = _inputSource.ToString(),
+        LastBleAddress = _savedBleAddress,
+        LastBleName = _savedBleName,
+    };
+
+    /// <summary>Saves only when something changed, so it is cheap to call from the UI tick.</summary>
+    private void SaveSettingsIfChanged()
+    {
+        var current = CaptureSettings();
+        if (current != _lastSavedSettings && SettingsStore.Save(SettingsPath, current))
+        {
+            _lastSavedSettings = current;
+        }
+    }
+
+    // ---------- Calibration ----------
+
+    private void BeginCalibration(CalibrationKind kind)
+    {
+        if (!CanCalibrate)
+        {
+            return;
+        }
+
+        _collector = new CalibrationCollector(kind, CalibrationDuration);
+        _calibrationClock.Restart();
+        CalibrationStatus = kind == CalibrationKind.Rest ? "REST: relax your muscle..." : "MAX: flex as hard as you can...";
+        RaiseCommands();
+    }
+
+    private void UpdateCalibration()
+    {
+        var collector = _collector;
+        if (collector is null)
+        {
+            return;
+        }
+
+        var label = collector.Kind == CalibrationKind.Rest ? "REST" : "MAX";
+        if (collector.IsComplete && collector.Result is { } result)
+        {
+            if (collector.Kind == CalibrationKind.Rest)
+            {
+                Rest = result;
+            }
+            else
+            {
+                Max = result;
+            }
+
+            CalibrationStatus = $"{label} = {result:0.#}";
+            _collector = null;
+            RaiseCommands();
+        }
+        else if (_calibrationClock.Elapsed > CalibrationDuration + TimeSpan.FromSeconds(3) || !IsRunning)
+        {
+            CalibrationStatus = $"{label}: no samples received (is the input running?)";
+            _collector = null;
+            RaiseCommands();
+        }
+        else
+        {
+            var action = collector.Kind == CalibrationKind.Rest ? "relax" : "flex hard";
+            CalibrationStatus = $"{label}: {action}... {collector.Progress:P0}";
+        }
+    }
+
+    // ---------- Logging ----------
+
+    private async Task ToggleLoggingAsync()
+    {
+        if (_logger.IsRunning)
+        {
+            await _logger.StopAsync();
+            IsLogging = false;
+            LoggingStatus = $"Saved {_logger.RowsWritten} rows: {_logger.FilePath}";
+            return;
+        }
+
+        try
+        {
+            var path = Path.Combine(LogDirectory, $"tailemg_{DateTime.Now:yyyyMMdd_HHmmss}.csv");
+            _logger.Start(path);
+            IsLogging = true;
+            LoggingStatus = $"Logging to {path}";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            LoggingStatus = $"Cannot start logging: {ex.Message}";
+        }
+    }
+
+    private void OpenLogFolder()
+    {
+        try
+        {
+            Directory.CreateDirectory(LogDirectory);
+            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{LogDirectory}\"") { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            LoggingStatus = $"Cannot open folder: {ex.Message}";
+        }
+    }
+
+    // Runs on the input thread: enqueue only, never block.
+    private void OnSampleProcessed(object? sender, ProcessedSample p)
+    {
+        _collector?.Add(p.Timestamp, p.Raw);
+
+        if (_logger.IsRunning)
+        {
+            var state = IsBleSource ? _ble.State.ToString() : "Fake";
+            _logger.TryWrite(new CsvLogRow(
+                p.Timestamp, p.RawText, p.Raw, p.Normalized, p.DeadzoneOutput, p.CurveOutput, p.Filtered,
+                _publisher.LastOutput, state));
+        }
+    }
+
+    // ---------- Chart ----------
+
+    private void AddChartPoints()
+    {
+        if (IsRunning)
+        {
+            var t = ChartClock.Now;
+            var latest = _pipeline.GetLatest(FakeEmgInput.DefaultChannel);
+
+            // Only plot input-derived lines while samples are fresh, so a lost link shows as a gap.
+            if (latest is not null && DateTimeOffset.Now - latest.Timestamp < FreshSampleAge)
+            {
+                _rawSeries.Add(t, latest.Raw, ChartWindowSeconds);
+                _normalizedSeries.Add(t, latest.Normalized, ChartWindowSeconds);
+                _filteredSeries.Add(t, latest.Filtered, ChartWindowSeconds);
+            }
+
+            _restSeries.Add(t, _processing.Rest, ChartWindowSeconds);
+            _maxSeries.Add(t, _processing.Max, ChartWindowSeconds);
+            _oscSeries.Add(t, _publisher.LastOutput, ChartWindowSeconds);
+        }
+
+        // Always repaint: the time axis keeps scrolling (old points slide off) even when stopped.
+        ChartUpdated?.Invoke(this, EventArgs.Empty);
     }
 
     private void ToggleScan()
@@ -348,6 +598,8 @@ public sealed class MainViewModel : ObservableObject
         _uiTimer.Stop();
         _scanner.Stop();
         await StopAsync();
+        await _logger.StopAsync();
+        SaveSettingsIfChanged();
     }
 
     // Runs on a thread-pool thread: touch only thread-safe things here.
@@ -400,6 +652,19 @@ public sealed class MainViewModel : ObservableObject
         }
 
         UpdateNotificationRate();
+        UpdateCalibration();
+        AddChartPoints();
+
+        if (_logger.IsRunning)
+        {
+            LoggingStatus = $"Logging: {_logger.RowsWritten} rows" + (_logger.Dropped > 0 ? $", {_logger.Dropped} dropped" : "")
+                + (_logger.LastError is { } e ? $" - ERROR {e}" : "") + $"  ({_logger.FilePath})";
+        }
+
+        if (_tick % 60 == 0)
+        {
+            SaveSettingsIfChanged(); // ~2 s granularity; also saved on exit
+        }
 
         if (_tick % 6 == 0)
         {
@@ -446,13 +711,19 @@ public sealed class MainViewModel : ObservableObject
             if (item is null)
             {
                 item = new BleDeviceItem(info);
-                if (item.LooksLikeMyoWare)
+                var remembered = SelectedDevice is null && info.Address == _savedBleAddress;
+                if (item.LooksLikeMyoWare || remembered)
                 {
                     Devices.Insert(0, item); // candidates float to the top
                 }
                 else
                 {
                     Devices.Add(item);
+                }
+
+                if (remembered)
+                {
+                    SelectedDevice = item; // last used device re-selected automatically
                 }
             }
             else
@@ -498,5 +769,7 @@ public sealed class MainViewModel : ObservableObject
         ConnectCommand.RaiseCanExecuteChanged();
         DisconnectCommand.RaiseCanExecuteChanged();
         DiscoverCommand.RaiseCanExecuteChanged();
+        CalibrateRestCommand.RaiseCanExecuteChanged();
+        CalibrateMaxCommand.RaiseCanExecuteChanged();
     }
 }

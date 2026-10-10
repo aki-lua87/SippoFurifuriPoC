@@ -4,7 +4,11 @@ namespace TailEmg.Core.Input;
 public sealed record EmgSample(
     DateTimeOffset Timestamp,
     int Channel,
-    double Value);
+    double Value)
+{
+    /// <summary>Original transport text (e.g. the BLE payload "684.00"), kept for logging. Null for synthetic inputs.</summary>
+    public string? RawText { get; init; }
+}
 
 public interface IEmgInput
 {

@@ -12,6 +12,13 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         DataContext = _vm;
+
+        // Charts draw directly (no binding per point), so repaint when the view model added points.
+        _vm.ChartUpdated += (_, _) =>
+        {
+            RawChart.InvalidateVisual();
+            OutputChart.InvalidateVisual();
+        };
     }
 
     private async void Window_Closing(object? sender, CancelEventArgs e)
@@ -25,6 +32,9 @@ public partial class MainWindow : Window
         e.Cancel = true;
         await _vm.ShutdownAsync();
         _shutdownDone = true;
-        Close();
+
+        // ShutdownAsync can complete synchronously (nothing running), i.e. while we are still inside the
+        // Closing event. Calling Close() there throws, so queue it until this handler has returned.
+        _ = Dispatcher.BeginInvoke(Close);
     }
 }

@@ -246,7 +246,7 @@ public sealed class MyoWareBleInput : IEmgInput
             NotificationReceived?.Invoke(this, new BleNotification(timestamp, bytes, text, ok ? value : null));
             if (ok)
             {
-                SampleReceived?.Invoke(this, new EmgSample(timestamp, DefaultChannel, value));
+                SampleReceived?.Invoke(this, new EmgSample(timestamp, DefaultChannel, value) { RawText = text });
             }
         }
         catch (Exception)

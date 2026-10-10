@@ -88,12 +88,12 @@ public sealed class FakeEmgInput : IEmgInput
     private async Task RunAsync(CancellationToken ct)
     {
         using var timer = new PeriodicTimer(Interval);
-        var start = DateTimeOffset.UtcNow;
+        var start = DateTimeOffset.Now;
         try
         {
             while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
             {
-                var now = DateTimeOffset.UtcNow;
+                var now = DateTimeOffset.Now; // local offset, same as the BLE input, so logs read the same
                 var value = Mode == FakeEmgMode.Sine
                     ? SineValue((now - start).TotalSeconds, SinePeriodSeconds)
                     : ManualValue;

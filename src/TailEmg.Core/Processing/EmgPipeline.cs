@@ -33,7 +33,8 @@ public sealed record ProcessedSample(
     double Normalized,
     double DeadzoneOutput,
     double CurveOutput,
-    double Filtered);
+    double Filtered,
+    string? RawText = null);
 
 /// <summary>
 /// Raw → Normalize → Deadzone → Curve → EMA (per channel). Pure function of sample + settings,
@@ -69,7 +70,7 @@ public sealed class EmgPipeline
         var filtered = SignalProcessing.EmaTimed(previous, curved, s.SmoothingAlpha, dt);
         _filtered[sample.Channel] = filtered;
 
-        var result = new ProcessedSample(sample.Timestamp, sample.Channel, sample.Value, normalized, dead, curved, filtered);
+        var result = new ProcessedSample(sample.Timestamp, sample.Channel, sample.Value, normalized, dead, curved, filtered, sample.RawText);
         _latest[sample.Channel] = result;
         SampleProcessed?.Invoke(this, result);
         return result;
